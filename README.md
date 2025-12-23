@@ -1,4 +1,4 @@
-# Inference Engine
+# The Boring Inferencing Engine
 
 A production-grade inference engine for serving embedding models and classifiers with batching, monitoring, and comprehensive testing.
 
