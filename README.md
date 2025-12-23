@@ -1,5 +1,10 @@
 # The Boring Inferencing Engine
 
+[![Docker Hub](https://img.shields.io/docker/v/boringserver/inference-engine?label=Docker%20Hub&logo=docker)](https://hub.docker.com/r/boringserver/inference-engine)
+[![Docker Image Size](https://img.shields.io/docker/image-size/boringserver/inference-engine/latest)](https://hub.docker.com/r/boringserver/inference-engine)
+[![Docker Pulls](https://img.shields.io/docker/pulls/boringserver/inference-engine)](https://hub.docker.com/r/boringserver/inference-engine)
+[![CI/CD](https://github.com/cahuja1992/BoringServer/actions/workflows/docker-hub.yml/badge.svg)](https://github.com/cahuja1992/BoringServer/actions/workflows/docker-hub.yml)
+
 A production-grade inference engine for serving embedding models and classifiers with batching, monitoring, and comprehensive testing.
 
 ## Features
@@ -284,6 +289,24 @@ Structured JSON logging with configurable levels:
 
 ## Docker Deployment
 
+### Quick Start with Docker Hub
+
+```bash
+# Pull the latest image
+docker pull boringserver/inference-engine:latest
+
+# Run with CLIP model (CPU mode)
+docker run -p 8000:8000 boringserver/inference-engine:latest
+
+# Run with GPU support
+docker run --gpus all -p 8000:8000 boringserver/inference-engine:latest
+
+# Test the API
+curl http://localhost:8000/health
+```
+
+### Build from Source
+
 ```bash
 # Build image
 docker build -t inference-engine:latest .
@@ -295,6 +318,23 @@ docker run --gpus all -p 8000:8000 \
   inference-engine:latest \
   --model_directory /app/models/clip
 ```
+
+### Docker Compose
+
+```bash
+# Start with docker-compose
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop services
+docker-compose down
+```
+
+For detailed Docker deployment instructions, see [DOCKER_DEPLOYMENT.md](docs/DOCKER_DEPLOYMENT.md).
+
+For Docker Hub setup and CI/CD, see [DOCKER_HUB_SETUP.md](docs/DOCKER_HUB_SETUP.md).
 
 ## Development
 
