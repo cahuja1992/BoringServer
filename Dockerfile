@@ -1,4 +1,5 @@
 # Multi-stage build for production inference engine
+# Optimized for GitHub Actions with minimal disk usage
 FROM python:3.10-slim as builder
 
 # Set environment variables
@@ -11,7 +12,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
 # Set working directory
 WORKDIR /app
@@ -20,9 +22,11 @@ WORKDIR /app
 COPY requirements.txt ./
 COPY pyproject.toml ./
 
-# Install Python dependencies
-RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+# Install Python dependencies with no cache to save space
+RUN pip install --upgrade pip --no-cache-dir && \
+    pip install --no-cache-dir -r requirements.txt && \
+    find /usr/local/lib/python3.10/site-packages -type d -name tests -exec rm -rf {} + 2>/dev/null || true && \
+    find /usr/local/lib/python3.10/site-packages -type d -name test -exec rm -rf {} + 2>/dev/null || true
 
 # Production stage
 FROM python:3.10-slim
@@ -31,12 +35,15 @@ FROM python:3.10-slim
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/home/appuser/.cache/huggingface \
+    TRANSFORMERS_CACHE=/home/appuser/.cache/huggingface
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser
@@ -55,7 +62,7 @@ COPY --chown=appuser:appuser configs/ ./configs/
 COPY --chown=appuser:appuser service.py ./
 
 # Create necessary directories
-RUN mkdir -p /home/appuser/.cache && \
+RUN mkdir -p /home/appuser/.cache/huggingface && \
     chown -R appuser:appuser /home/appuser/.cache
 
 # Switch to non-root user
