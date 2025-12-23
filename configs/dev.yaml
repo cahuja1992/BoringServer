@@ -1,0 +1,11 @@
+# Development environment configuration
+extends: base.yaml
+
+logging:
+  level: "DEBUG"
+  
+ray:
+  include_dashboard: true
+  
+security:
+  rate_limit_enabled: false

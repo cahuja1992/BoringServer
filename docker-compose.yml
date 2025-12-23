@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  inference-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: inference-engine:latest
+    container_name: inference-engine
+    ports:
+      - "8000:8000"
+      - "9090:9090"
+    volumes:
+      - ./models:/app/models:ro
+      - ./configs:/app/configs:ro
+    environment:
+      - ENVIRONMENT=prod
+      - INFERENCE_SERVICE__HOST=0.0.0.0
+      - INFERENCE_SERVICE__PORT=8000
+      - INFERENCE_METRICS__ENABLED=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: ["--model_directory", "/app/models/clip", "--env", "prod"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

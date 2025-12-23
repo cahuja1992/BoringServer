@@ -1,0 +1,44 @@
+# Base configuration for inference engine
+
+service:
+  name: "inference-engine"
+  version: "1.0.0"
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+  
+ray:
+  num_gpus: 1
+  include_dashboard: false
+  log_to_driver: true
+  
+server:
+  max_queue_size: 1024
+  request_timeout_s: 30
+  shutdown_timeout_s: 60
+  
+logging:
+  level: "INFO"
+  format: "json"
+  output: "stdout"
+  
+metrics:
+  enabled: true
+  port: 9090
+  path: "/metrics"
+  
+health:
+  enabled: true
+  path: "/health"
+  readiness_path: "/ready"
+  
+models:
+  default_batch_size: 16
+  default_batch_wait_s: 0.003
+  warmup_enabled: true
+  
+security:
+  rate_limit_enabled: true
+  rate_limit_requests: 100
+  rate_limit_period_s: 60
+  max_upload_size_mb: 10

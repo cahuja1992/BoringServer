@@ -1,0 +1,13 @@
+# Production environment configuration
+extends: base.yaml
+
+logging:
+  level: "INFO"
+  
+server:
+  max_queue_size: 2048
+  
+security:
+  rate_limit_enabled: true
+  rate_limit_requests: 1000
+  rate_limit_period_s: 60
