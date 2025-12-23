@@ -54,7 +54,7 @@ logger = get_logger(__name__)
 
 @serve.deployment(
     ray_actor_options={
-        "num_gpus": config.ray.num_gpus,
+        "num_gpus": config.ray.num_gpus if torch.cuda.is_available() else 0,
     }
 )
 class ModelWorker:
@@ -435,6 +435,12 @@ def main() -> None:
     logger.info(f"Starting {config.service.name} v{config.service.version}")
     logger.info(f"Model directory: {args.model_directory}")
     logger.info(f"Environment: {args.env}")
+    
+    # Detect GPU availability
+    gpu_available = torch.cuda.is_available()
+    num_gpus = torch.cuda.device_count() if gpu_available else 0
+    logger.info(f"GPU available: {gpu_available}, count: {num_gpus}")
+    
     logger.info(f"Configuration: {config.model_dump()}")
 
     try:
@@ -446,9 +452,9 @@ def main() -> None:
         )
 
         # Initialize Ray
-        logger.info("Initializing Ray")
+        logger.info(f"Initializing Ray with {num_gpus} GPUs")
         ray.init(
-            num_gpus=torch.cuda.device_count(),
+            num_gpus=num_gpus,
             include_dashboard=config.ray.include_dashboard,
             log_to_driver=config.ray.log_to_driver,
         )

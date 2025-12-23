@@ -1,1 +1,15 @@
-{"name": "clip-vit-l14"}
+{
+  "name": "clip-vit-base-patch32",
+  "version": "1.0",
+  "description": "OpenAI CLIP ViT-Base-Patch32 model for image embeddings",
+  "batch_size": 8,
+  "batch_wait_s": 0.005,
+  "metadata": {
+    "model_type": "embedding",
+    "framework": "pytorch",
+    "base_model": "openai/clip-vit-base-patch32",
+    "embedding_dim": 512,
+    "supports_cpu": true,
+    "supports_gpu": true
+  }
+}
