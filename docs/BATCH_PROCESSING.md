@@ -492,9 +492,8 @@ spec:
           - python
           - batch_service.py
           - --model_directory=models/clip
-          - --s3_bucket=my-bucket
-          - --s3_prefix=data/
-          - --output_path=/output
+          - --input_dir=s3://my-bucket/data/
+          - --output_dir=/output
           - --num_workers=4
         resources:
           limits:
