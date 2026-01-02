@@ -9,6 +9,7 @@ A production-grade inference engine for serving embedding models and classifiers
 
 ## Features
 
+### Real-Time Inference
 - ⚡ **High Performance**: Dynamic batching with configurable batch sizes and wait times
 - 📊 **Monitoring**: Prometheus metrics, structured logging, and health checks
 - 🔒 **Production Ready**: Rate limiting, request validation, error handling
@@ -16,6 +17,14 @@ A production-grade inference engine for serving embedding models and classifiers
 - 🐳 **Docker Support**: Containerized deployment with GPU support
 - ⚙️ **Configurable**: YAML-based configuration with environment overrides
 - 🔄 **Async Processing**: Non-blocking request queue with async/await
+
+### Batch Processing
+- 🚀 **Large-Scale Processing**: Process millions of images efficiently
+- 🌐 **Flexible I/O**: Unified `input_dir`/`output_dir` API for S3 and local filesystem
+- 📦 **img2dataset Compatible**: Works directly with webdataset parquet format
+- 🔀 **Multi-GPU**: Parallel processing with Ray actors
+- 💾 **Smart I/O**: Mix and match S3 and local paths as needed
+- 📊 **Production Ready**: Error handling, progress tracking, and monitoring
 
 ## Architecture
 
@@ -53,7 +62,7 @@ pip install -e ".[dev]"
 pip install -e .
 ```
 
-### Running the Service
+### Running the Real-Time Service
 
 ```bash
 # Development mode
@@ -65,6 +74,35 @@ python service.py --model_directory models/clip --env prod
 # With custom config
 python service.py --model_directory models/clip --config configs/custom.yaml
 ```
+
+### Running Batch Processing
+
+Process large datasets with S3 or local filesystem:
+
+```bash
+# S3 to S3 (cloud-native)
+python batch_service.py \
+  --model_directory models/clip \
+  --input_dir s3://my-bucket/datasets/images \
+  --output_dir s3://my-bucket/embeddings \
+  --num_workers 4
+
+# Local to Local
+python batch_service.py \
+  --model_directory models/clip \
+  --input_dir ./data/webdataset \
+  --output_dir ./output/embeddings \
+  --num_workers 4
+
+# Mix and match: S3 to Local, Local to S3
+python batch_service.py \
+  --model_directory models/clip \
+  --input_dir s3://my-bucket/data \
+  --output_dir ./local_output \
+  --num_workers 4
+```
+
+**📖 See [Batch Processing Quick Start](docs/BATCH_PROCESSING_QUICKSTART.md) and [Full Guide](docs/BATCH_PROCESSING.md)**
 
 ### Environment Variables
 
@@ -408,3 +446,18 @@ For issues and questions:
 - Create an issue on GitHub
 - Check documentation in `docs/`
 - Review example models in `models/`
+
+## Documentation
+
+### Real-Time Inference
+- [Architecture](docs/ARCHITECTURE.md)
+- [API Reference](docs/API.md)
+- [Docker Deployment](docs/DOCKER_DEPLOYMENT.md)
+- [Docker Hub Setup](docs/DOCKER_HUB_SETUP.md)
+
+### Batch Processing
+- [Quick Start Guide](docs/BATCH_PROCESSING_QUICKSTART.md) - Get started in 5 minutes
+- [Full Documentation](docs/BATCH_PROCESSING.md) - Comprehensive guide with examples
+- Supported formats: img2dataset webdataset (parquet shards)
+- Flexible I/O: S3 ↔ S3, S3 ↔ Local, Local ↔ Local
+- Performance: 150-1500 images/second depending on GPU setup
