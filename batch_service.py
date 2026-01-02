@@ -1,28 +1,26 @@
-"""Batch inference service for processing webdataset from S3.
+"""Batch inference service for processing webdataset.
 
-Supports img2dataset format with parquet metadata and image shards.
+Supports img2dataset format with parquet metadata from both S3 and local filesystem.
 """
 
 import argparse
-import asyncio
 import io
 import json
 import os
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
+from urllib.parse import urlparse
 
 import boto3
 import pandas as pd
-import pyarrow.parquet as pq
 import ray
 import torch
 from botocore.exceptions import ClientError
 from PIL import Image
-from ray import serve
 from tqdm import tqdm
 
-from engine.config import get_config, load_config
+from engine.config import load_config
 from engine.loader import load_model, validate_model_interface
 from engine.logging import get_logger, setup_logging
 from engine.metrics import MetricsCollector
@@ -32,106 +30,135 @@ from engine.utils import decode_image
 logger = get_logger(__name__)
 
 
-class S3DataLoader:
-    """Load webdataset format from S3."""
+class UnifiedDataLoader:
+    """Unified data loader supporting both S3 and local filesystem."""
 
     def __init__(
         self,
-        s3_bucket: str,
-        s3_prefix: str,
+        input_dir: str,
         aws_access_key: Optional[str] = None,
         aws_secret_key: Optional[str] = None,
         aws_region: Optional[str] = None,
     ):
-        """Initialize S3 data loader.
+        """Initialize unified data loader.
 
         Args:
-            s3_bucket: S3 bucket name
-            s3_prefix: S3 prefix/path to dataset
+            input_dir: Input directory (s3://bucket/prefix or local path)
             aws_access_key: AWS access key (or from env)
             aws_secret_key: AWS secret key (or from env)
             aws_region: AWS region (default: us-east-1)
         """
-        self.s3_bucket = s3_bucket
-        self.s3_prefix = s3_prefix.rstrip("/")
+        self.input_dir = input_dir
+        self.is_s3 = input_dir.startswith("s3://")
 
-        # Initialize S3 client
-        session_kwargs = {}
-        if aws_access_key and aws_secret_key:
-            session_kwargs = {
-                "aws_access_key_id": aws_access_key,
-                "aws_secret_access_key": aws_secret_key,
-            }
+        if self.is_s3:
+            # Parse S3 URL
+            parsed = urlparse(input_dir)
+            self.s3_bucket = parsed.netloc
+            self.s3_prefix = parsed.path.lstrip("/")
 
-        self.s3_client = boto3.client(
-            "s3", region_name=aws_region or "us-east-1", **session_kwargs
-        )
+            # Initialize S3 client
+            session_kwargs = {}
+            if aws_access_key and aws_secret_key:
+                session_kwargs = {
+                    "aws_access_key_id": aws_access_key,
+                    "aws_secret_access_key": aws_secret_key,
+                }
 
-        logger.info(f"S3DataLoader initialized: s3://{s3_bucket}/{s3_prefix}")
+            self.s3_client = boto3.client(
+                "s3", region_name=aws_region or "us-east-1", **session_kwargs
+            )
+
+            logger.info(f"S3 mode: s3://{self.s3_bucket}/{self.s3_prefix}")
+        else:
+            # Local filesystem
+            self.local_path = Path(input_dir)
+            if not self.local_path.exists():
+                raise ValueError(f"Input directory does not exist: {input_dir}")
+
+            logger.info(f"Local mode: {self.local_path}")
 
     def list_shards(self) -> List[str]:
-        """List all parquet shards in S3.
+        """List all parquet shards.
 
         Returns:
-            List of shard keys
+            List of shard paths (S3 keys or local paths)
         """
         shards = []
-        paginator = self.s3_client.get_paginator("list_objects_v2")
 
-        try:
-            for page in paginator.paginate(
-                Bucket=self.s3_bucket, Prefix=self.s3_prefix
-            ):
-                if "Contents" not in page:
-                    continue
+        if self.is_s3:
+            # S3 mode
+            paginator = self.s3_client.get_paginator("list_objects_v2")
 
-                for obj in page["Contents"]:
-                    key = obj["Key"]
-                    if key.endswith(".parquet"):
-                        shards.append(key)
+            try:
+                for page in paginator.paginate(
+                    Bucket=self.s3_bucket, Prefix=self.s3_prefix
+                ):
+                    if "Contents" not in page:
+                        continue
 
-            logger.info(f"Found {len(shards)} parquet shards")
+                    for obj in page["Contents"]:
+                        key = obj["Key"]
+                        if key.endswith(".parquet"):
+                            shards.append(key)
+
+                logger.info(f"Found {len(shards)} parquet shards in S3")
+                return sorted(shards)
+
+            except ClientError as e:
+                logger.error(f"Failed to list S3 objects: {e}")
+                raise
+        else:
+            # Local filesystem mode
+            for parquet_file in self.local_path.glob("**/*.parquet"):
+                shards.append(str(parquet_file))
+
+            logger.info(f"Found {len(shards)} parquet shards locally")
             return sorted(shards)
 
-        except ClientError as e:
-            logger.error(f"Failed to list S3 objects: {e}")
-            raise
-
-    def load_shard(self, shard_key: str) -> pd.DataFrame:
-        """Load a parquet shard from S3.
+    def load_shard(self, shard_path: str) -> pd.DataFrame:
+        """Load a parquet shard.
 
         Args:
-            shard_key: S3 key for parquet file
+            shard_path: S3 key or local path to parquet file
 
         Returns:
             DataFrame with shard data
         """
         try:
-            obj = self.s3_client.get_object(Bucket=self.s3_bucket, Key=shard_key)
-            parquet_buffer = io.BytesIO(obj["Body"].read())
-            df = pd.read_parquet(parquet_buffer)
+            if self.is_s3:
+                # Load from S3
+                obj = self.s3_client.get_object(
+                    Bucket=self.s3_bucket, Key=shard_path
+                )
+                parquet_buffer = io.BytesIO(obj["Body"].read())
+                df = pd.read_parquet(parquet_buffer)
+                logger.debug(f"Loaded S3 shard {shard_path}: {len(df)} rows")
+            else:
+                # Load from local filesystem
+                df = pd.read_parquet(shard_path)
+                logger.debug(f"Loaded local shard {shard_path}: {len(df)} rows")
 
-            logger.debug(f"Loaded shard {shard_key}: {len(df)} rows")
             return df
 
-        except ClientError as e:
-            logger.error(f"Failed to load shard {shard_key}: {e}")
+        except Exception as e:
+            logger.error(f"Failed to load shard {shard_path}: {e}")
             raise
 
     def load_image_from_url(self, image_url: str) -> Image.Image:
-        """Load image from URL (S3 or HTTP).
+        """Load image from URL (S3 or local path).
 
         Args:
-            image_url: Image URL
+            image_url: Image URL (s3://bucket/key or local path)
 
         Returns:
             PIL Image
         """
         if image_url.startswith("s3://"):
             # Parse S3 URL
-            parts = image_url[5:].split("/", 1)
-            bucket = parts[0]
-            key = parts[1] if len(parts) > 1 else ""
+            parsed = urlparse(image_url)
+            bucket = parsed.netloc
+            key = parsed.path.lstrip("/")
 
             try:
                 obj = self.s3_client.get_object(Bucket=bucket, Key=key)
@@ -141,25 +168,31 @@ class S3DataLoader:
                 logger.error(f"Failed to load image from S3: {image_url}, {e}")
                 raise
         else:
-            # HTTP(S) URL - would need requests library
-            raise NotImplementedError("HTTP image loading not implemented")
+            # Local filesystem
+            try:
+                with open(image_url, "rb") as f:
+                    image_bytes = f.read()
+                return decode_image(image_bytes)
+            except Exception as e:
+                logger.error(f"Failed to load local image: {image_url}, {e}")
+                raise
 
     def iterate_samples(
-        self, shard_keys: Optional[List[str]] = None
+        self, shard_paths: Optional[List[str]] = None
     ) -> Iterator[Dict[str, Any]]:
         """Iterate over all samples in shards.
 
         Args:
-            shard_keys: Specific shards to process (None = all)
+            shard_paths: Specific shards to process (None = all)
 
         Yields:
             Sample dict with: url, image (optional), caption, metadata
         """
-        if shard_keys is None:
-            shard_keys = self.list_shards()
+        if shard_paths is None:
+            shard_paths = self.list_shards()
 
-        for shard_key in shard_keys:
-            df = self.load_shard(shard_key)
+        for shard_path in shard_paths:
+            df = self.load_shard(shard_path)
 
             for idx, row in df.iterrows():
                 sample = {
@@ -175,6 +208,100 @@ class S3DataLoader:
                         sample["metadata"][col] = row[col]
 
                 yield sample
+
+
+class UnifiedOutputWriter:
+    """Unified output writer supporting both S3 and local filesystem."""
+
+    def __init__(
+        self,
+        output_dir: str,
+        aws_access_key: Optional[str] = None,
+        aws_secret_key: Optional[str] = None,
+        aws_region: Optional[str] = None,
+    ):
+        """Initialize unified output writer.
+
+        Args:
+            output_dir: Output directory (s3://bucket/prefix or local path)
+            aws_access_key: AWS access key (or from env)
+            aws_secret_key: AWS secret key (or from env)
+            aws_region: AWS region (default: us-east-1)
+        """
+        self.output_dir = output_dir
+        self.is_s3 = output_dir.startswith("s3://")
+
+        if self.is_s3:
+            # Parse S3 URL
+            parsed = urlparse(output_dir)
+            self.s3_bucket = parsed.netloc
+            self.s3_prefix = parsed.path.lstrip("/")
+
+            # Initialize S3 client
+            session_kwargs = {}
+            if aws_access_key and aws_secret_key:
+                session_kwargs = {
+                    "aws_access_key_id": aws_access_key,
+                    "aws_secret_access_key": aws_secret_key,
+                }
+
+            self.s3_client = boto3.client(
+                "s3", region_name=aws_region or "us-east-1", **session_kwargs
+            )
+
+            logger.info(f"Output to S3: s3://{self.s3_bucket}/{self.s3_prefix}")
+        else:
+            # Local filesystem
+            self.local_path = Path(output_dir)
+            self.local_path.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Output to local: {self.local_path}")
+
+    def write_parquet(self, df: pd.DataFrame, filename: str) -> None:
+        """Write DataFrame to parquet.
+
+        Args:
+            df: DataFrame to write
+            filename: Output filename (e.g., 'embeddings.parquet')
+        """
+        if self.is_s3:
+            # Write to S3
+            buffer = io.BytesIO()
+            df.to_parquet(buffer, index=False)
+            buffer.seek(0)
+
+            s3_key = f"{self.s3_prefix}/{filename}".lstrip("/")
+            self.s3_client.put_object(
+                Bucket=self.s3_bucket, Key=s3_key, Body=buffer.getvalue()
+            )
+            logger.info(f"Wrote parquet to s3://{self.s3_bucket}/{s3_key}")
+        else:
+            # Write to local filesystem
+            output_file = self.local_path / filename
+            df.to_parquet(output_file, index=False)
+            logger.info(f"Wrote parquet to {output_file}")
+
+    def write_json(self, data: dict, filename: str) -> None:
+        """Write dict to JSON.
+
+        Args:
+            data: Dictionary to write
+            filename: Output filename (e.g., 'metadata.json')
+        """
+        json_str = json.dumps(data, indent=2)
+
+        if self.is_s3:
+            # Write to S3
+            s3_key = f"{self.s3_prefix}/{filename}".lstrip("/")
+            self.s3_client.put_object(
+                Bucket=self.s3_bucket, Key=s3_key, Body=json_str.encode()
+            )
+            logger.info(f"Wrote JSON to s3://{self.s3_bucket}/{s3_key}")
+        else:
+            # Write to local filesystem
+            output_file = self.local_path / filename
+            with open(output_file, "w") as f:
+                f.write(json_str)
+            logger.info(f"Wrote JSON to {output_file}")
 
 
 @ray.remote(num_gpus=1 if torch.cuda.is_available() else 0)
@@ -223,9 +350,7 @@ class BatchInferenceWorker:
         self.batch_size = self.model.batch_size()
         logger.info(f"Worker ready: batch_size={self.batch_size}")
 
-    def process_batch(
-        self, batch: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+    def process_batch(self, batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Process a batch of samples.
 
         Args:
@@ -308,23 +433,20 @@ class BatchInferenceOrchestrator:
 
     def process_dataset(
         self,
-        data_loader: S3DataLoader,
-        output_path: str,
+        data_loader: UnifiedDataLoader,
+        output_writer: UnifiedOutputWriter,
         load_images: bool = True,
         max_samples: Optional[int] = None,
     ) -> None:
         """Process entire dataset.
 
         Args:
-            data_loader: S3 data loader
-            output_path: Output directory for results
+            data_loader: Data loader
+            output_writer: Output writer
             load_images: Whether to load images (False = use pre-loaded paths)
             max_samples: Max samples to process (None = all)
         """
-        output_dir = Path(output_path)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        logger.info(f"Starting batch processing, output: {output_dir}")
+        logger.info(f"Starting batch processing")
 
         # Collect samples
         samples = []
@@ -369,7 +491,9 @@ class BatchInferenceOrchestrator:
 
             # Collect results periodically to avoid memory buildup
             if len(futures) >= self.num_workers * 2:
-                ready_futures, futures = ray.wait(futures, num_returns=len(futures) // 2)
+                ready_futures, futures = ray.wait(
+                    futures, num_returns=len(futures) // 2
+                )
                 batch_results = ray.get(ready_futures)
                 for results in batch_results:
                     all_results.extend(results)
@@ -383,18 +507,20 @@ class BatchInferenceOrchestrator:
         logger.info(f"Processed {len(all_results)} samples")
 
         # Save results
-        self._save_results(all_results, output_dir)
+        self._save_results(all_results, output_writer)
 
-        logger.info(f"Results saved to {output_dir}")
+        logger.info(f"Results saved to {output_writer.output_dir}")
 
-    def _save_results(self, results: List[Dict[str, Any]], output_dir: Path) -> None:
-        """Save results to disk.
+    def _save_results(
+        self, results: List[Dict[str, Any]], output_writer: UnifiedOutputWriter
+    ) -> None:
+        """Save results to output.
 
         Args:
             results: List of result dicts
-            output_dir: Output directory
+            output_writer: Output writer
         """
-        # Save as parquet with embeddings
+        # Prepare DataFrame
         df_data = []
         for result in results:
             row = {
@@ -411,22 +537,16 @@ class BatchInferenceOrchestrator:
 
         df = pd.DataFrame(df_data)
 
-        # Save parquet
-        output_file = output_dir / "embeddings.parquet"
-        df.to_parquet(output_file, index=False)
-        logger.info(f"Saved embeddings to {output_file}")
+        # Write parquet
+        output_writer.write_parquet(df, "embeddings.parquet")
 
-        # Also save metadata JSON
+        # Write metadata
         metadata = {
             "num_samples": len(results),
             "model": self.model_directory,
             "timestamp": time.time(),
         }
-        metadata_file = output_dir / "metadata.json"
-        with open(metadata_file, "w") as f:
-            json.dump(metadata, f, indent=2)
-
-        logger.info(f"Saved metadata to {metadata_file}")
+        output_writer.write_json(metadata, "metadata.json")
 
 
 def main():
@@ -436,32 +556,32 @@ def main():
         "--model_directory", required=True, help="Path to model directory"
     )
     parser.add_argument(
-        "--s3_bucket", required=True, help="S3 bucket with dataset"
+        "--input_dir",
+        required=True,
+        help="Input directory (s3://bucket/prefix or local path)",
     )
     parser.add_argument(
-        "--s3_prefix", required=True, help="S3 prefix/path to dataset"
-    )
-    parser.add_argument(
-        "--output_path", required=True, help="Output directory for results"
+        "--output_dir",
+        required=True,
+        help="Output directory (s3://bucket/prefix or local path)",
     )
     parser.add_argument(
         "--num_workers", type=int, default=4, help="Number of parallel workers"
     )
     parser.add_argument(
-        "--batch_size", type=int, default=None, help="Batch size (None = model default)"
+        "--batch_size",
+        type=int,
+        default=None,
+        help="Batch size (None = model default)",
     )
     parser.add_argument(
         "--max_samples", type=int, default=None, help="Max samples to process"
     )
-    parser.add_argument(
-        "--config", default=None, help="Path to configuration file"
-    )
+    parser.add_argument("--config", default=None, help="Path to configuration file")
     parser.add_argument(
         "--env", default="prod", choices=["dev", "prod"], help="Environment"
     )
-    parser.add_argument(
-        "--aws_region", default="us-east-1", help="AWS region"
-    )
+    parser.add_argument("--aws_region", default="us-east-1", help="AWS region")
 
     args = parser.parse_args()
 
@@ -475,8 +595,8 @@ def main():
     setup_logging(config.logging)
     logger.info("Starting batch inference service")
     logger.info(f"Model: {args.model_directory}")
-    logger.info(f"Dataset: s3://{args.s3_bucket}/{args.s3_prefix}")
-    logger.info(f"Output: {args.output_path}")
+    logger.info(f"Input: {args.input_dir}")
+    logger.info(f"Output: {args.output_dir}")
     logger.info(f"Workers: {args.num_workers}")
 
     # Initialize Ray
@@ -486,10 +606,13 @@ def main():
 
     try:
         # Create data loader
-        data_loader = S3DataLoader(
-            s3_bucket=args.s3_bucket,
-            s3_prefix=args.s3_prefix,
-            aws_region=args.aws_region,
+        data_loader = UnifiedDataLoader(
+            input_dir=args.input_dir, aws_region=args.aws_region
+        )
+
+        # Create output writer
+        output_writer = UnifiedOutputWriter(
+            output_dir=args.output_dir, aws_region=args.aws_region
         )
 
         # Create orchestrator
@@ -503,7 +626,7 @@ def main():
         # Process dataset
         orchestrator.process_dataset(
             data_loader=data_loader,
-            output_path=args.output_path,
+            output_writer=output_writer,
             max_samples=args.max_samples,
         )
 

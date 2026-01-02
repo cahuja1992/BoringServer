@@ -120,12 +120,30 @@ aws configure
 
 ### Basic Usage
 
+**S3 to S3:**
 ```bash
 python batch_service.py \
   --model_directory models/clip \
-  --s3_bucket my-dataset-bucket \
-  --s3_prefix datasets/laion-subset \
-  --output_path ./output/embeddings \
+  --input_dir s3://my-bucket/datasets/laion-subset \
+  --output_dir s3://my-bucket/output/embeddings \
+  --num_workers 4
+```
+
+**Local to Local:**
+```bash
+python batch_service.py \
+  --model_directory models/clip \
+  --input_dir ./data/webdataset \
+  --output_dir ./output/embeddings \
+  --num_workers 4
+```
+
+**S3 to Local:**
+```bash
+python batch_service.py \
+  --model_directory models/clip \
+  --input_dir s3://my-bucket/datasets/images \
+  --output_dir ./output/embeddings \
   --num_workers 4
 ```
 
@@ -134,14 +152,13 @@ python batch_service.py \
 ```bash
 python batch_service.py \
   --model_directory models/clip \           # Path to model
-  --s3_bucket my-dataset-bucket \           # S3 bucket name
-  --s3_prefix datasets/laion-subset \       # S3 prefix/path
-  --output_path ./output/embeddings \       # Local output directory
+  --input_dir <path> \                      # Input (s3://bucket/prefix OR local path)
+  --output_dir <path> \                     # Output (s3://bucket/prefix OR local path)
   --num_workers 4 \                         # Number of parallel workers
   --batch_size 32 \                         # Batch size per worker
   --max_samples 10000 \                     # Limit samples (for testing)
   --env prod \                              # Environment (dev/prod)
-  --aws_region us-east-1                    # AWS region
+  --aws_region us-east-1                    # AWS region (for S3)
 ```
 
 ### Configuration File
@@ -149,11 +166,48 @@ python batch_service.py \
 ```bash
 python batch_service.py \
   --model_directory models/clip \
-  --s3_bucket my-bucket \
-  --s3_prefix data/ \
-  --output_path ./output \
+  --input_dir s3://my-bucket/data/ \
+  --output_dir ./output \
   --config configs/prod.yaml  # Use custom config
 ```
+
+---
+
+## Input/Output Flexibility
+
+### Supported Formats
+
+The batch service supports **both S3 and local filesystem** for input and output:
+
+| Input | Output | Use Case |
+|-------|--------|----------|
+| S3 | S3 | Cloud-native processing |
+| S3 | Local | Download results locally |
+| Local | S3 | Upload results to cloud |
+| Local | Local | Fully local processing |
+
+### S3 Path Format
+
+```bash
+s3://bucket-name/prefix/path/
+```
+
+**Examples:**
+- `s3://laion5b/part-00000/`
+- `s3://my-company-data/datasets/images-2024/`
+- `s3://output-bucket/embeddings/v1/`
+
+### Local Path Format
+
+```bash
+/absolute/path/to/directory
+./relative/path/to/directory
+```
+
+**Examples:**
+- `/data/webdataset/laion-subset/`
+- `./datasets/images/`
+- `~/Downloads/webdataset/`
 
 ---
 
@@ -175,9 +229,8 @@ python batch_service.py \
 # Example for 4x A100 GPUs
 python batch_service.py \
   --model_directory models/clip \
-  --s3_bucket my-bucket \
-  --s3_prefix data/ \
-  --output_path ./output \
+  --input_dir s3://my-bucket/data/ \
+  --output_dir s3://my-bucket/output/ \
   --num_workers 4 \
   --batch_size 64  # Increase for larger GPUs
 ```
@@ -237,15 +290,14 @@ embeddings = df['embedding'].tolist()  # List of vectors
 
 ## Examples
 
-### Example 1: Process LAION Subset
+### Example 1: Process LAION Subset (S3 to S3)
 
 ```bash
 # Process 100K images from LAION
 python batch_service.py \
   --model_directory models/clip \
-  --s3_bucket laion5b \
-  --s3_prefix part-00000 \
-  --output_path ./laion_embeddings \
+  --input_dir s3://laion5b/part-00000 \
+  --output_dir s3://my-bucket/laion_embeddings \
   --num_workers 8 \
   --batch_size 64 \
   --max_samples 100000
@@ -254,28 +306,38 @@ python batch_service.py \
 ### Example 2: Local Testing
 
 ```bash
-# Test with small sample
+# Test with small sample locally
 python batch_service.py \
   --model_directory models/clip \
-  --s3_bucket test-bucket \
-  --s3_prefix test-data/ \
-  --output_path ./test_output \
+  --input_dir ./test-data \
+  --output_dir ./test_output \
   --num_workers 1 \
   --batch_size 8 \
   --max_samples 100  # Only process 100 samples
 ```
 
-### Example 3: Full Dataset Processing
+### Example 3: S3 to Local (Download Results)
 
 ```bash
-# Process entire dataset (no max_samples limit)
+# Process in cloud, download results
 python batch_service.py \
   --model_directory models/clip \
-  --s3_bucket production-data \
-  --s3_prefix datasets/images-2024/ \
-  --output_path ./full_embeddings \
+  --input_dir s3://production-data/datasets/images-2024/ \
+  --output_dir ./local_embeddings \
   --num_workers 16 \
   --batch_size 128
+```
+
+### Example 4: Local to S3 (Upload Results)
+
+```bash
+# Process locally, upload to cloud
+python batch_service.py \
+  --model_directory models/clip \
+  --input_dir ./downloaded_dataset \
+  --output_dir s3://my-bucket/embeddings/v1 \
+  --num_workers 4 \
+  --batch_size 32
 ```
 
 ---
@@ -404,9 +466,8 @@ docker run --gpus all \
   boringserver/batch:latest \
   python batch_service.py \
     --model_directory models/clip \
-    --s3_bucket my-bucket \
-    --s3_prefix data/ \
-    --output_path /output \
+    --input_dir s3://my-bucket/data/ \
+    --output_dir /output \
     --num_workers 4
 ```
 
@@ -486,24 +547,50 @@ Use spot instances for batch processing:
 
 ## API Reference
 
-### S3DataLoader
+### UnifiedDataLoader
 
 ```python
-loader = S3DataLoader(
-    s3_bucket="my-bucket",
-    s3_prefix="data/",
+# S3 mode
+loader = UnifiedDataLoader(
+    input_dir="s3://my-bucket/data/",
     aws_region="us-east-1"
+)
+
+# Local mode
+loader = UnifiedDataLoader(
+    input_dir="./data/webdataset"
 )
 
 # List shards
 shards = loader.list_shards()
 
 # Load specific shard
-df = loader.load_shard("00000.parquet")
+df = loader.load_shard(shards[0])
 
 # Iterate samples
 for sample in loader.iterate_samples():
     print(sample['url'], sample['caption'])
+```
+
+### UnifiedOutputWriter
+
+```python
+# S3 mode
+writer = UnifiedOutputWriter(
+    output_dir="s3://my-bucket/output/",
+    aws_region="us-east-1"
+)
+
+# Local mode
+writer = UnifiedOutputWriter(
+    output_dir="./output"
+)
+
+# Write parquet
+writer.write_parquet(df, "embeddings.parquet")
+
+# Write JSON
+writer.write_json(metadata, "metadata.json")
 ```
 
 ### BatchInferenceOrchestrator
@@ -518,7 +605,7 @@ orchestrator = BatchInferenceOrchestrator(
 
 orchestrator.process_dataset(
     data_loader=loader,
-    output_path="./output",
+    output_writer=writer,
     max_samples=1000
 )
 ```
