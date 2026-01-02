@@ -9,3 +9,9 @@ pydantic-settings>=2.0.0
 python-multipart>=0.0.6
 pyyaml>=6.0
 prometheus-client>=0.17.0
+
+# Batch processing dependencies
+boto3>=1.28.0
+pandas>=2.0.0
+pyarrow>=12.0.0
+tqdm>=4.65.0
